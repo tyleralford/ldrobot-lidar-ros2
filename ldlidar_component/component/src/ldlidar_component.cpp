@@ -15,6 +15,8 @@
 
 #include "ldlidar_component.hpp"
 #include "ldlidar_tools.hpp"
+#include <algorithm>
+#include <cctype>
 #include "rcl_interfaces/msg/parameter_descriptor.hpp"
 #include "diagnostic_msgs/msg/diagnostic_status.hpp"
 #include "rmw/types.h"
@@ -27,6 +29,13 @@ namespace ldlidar
 {
 
 const int QOS_QUEUE_SIZE = 10;
+
+static std::string lowercase(std::string s)
+{
+  std::transform(
+    s.begin(), s.end(), s.begin(), [](unsigned char c) {return std::tolower(c);});
+  return s;
+}
 
 LdLidarComponent::LdLidarComponent(const rclcpp::NodeOptions & options)
 : nav2_util::LifecycleNode("lidar_node", "", options), _diagUpdater(this)
@@ -44,7 +53,7 @@ LdLidarComponent::LdLidarComponent(const rclcpp::NodeOptions & options)
 
   // ----> Diagnostic
   _diagUpdater.add("LDLidar Diagnostic", this, &LdLidarComponent::callback_updateDiagnostic);
-  _diagUpdater.setHardwareID("LDRobot lidar");
+  _diagUpdater.setHardwareID("ldlidar");  // replaced by the model once the parameters are read
   // <---- Diagnostic
 }
 
@@ -123,11 +132,13 @@ bool LdLidarComponent::getLidarParams()
     _lidarType = ldlidar::LDType::LD_06;
   } else if (_lidarModel == "LD19") {
     _lidarType = ldlidar::LDType::LD_19;
+  } else if (_lidarModel == "STL27L") {
+    _lidarType = ldlidar::LDType::STL_27L;
   } else {
     RCLCPP_ERROR_STREAM(
       get_logger(), " !!! The parameter 'lidar.model' is not valid! -> " << _lidarModel.c_str() );
     RCLCPP_ERROR_STREAM(
-      get_logger(), "     * Valid values: 'LD06', 'LD19'");
+      get_logger(), "     * Valid values: 'LD06', 'LD19', 'STL27L'");
     return false;
   }
 
@@ -166,6 +177,11 @@ bool LdLidarComponent::getLidarParams()
   getParam(
     "lidar.bins", _bins, _bins, "Fixed number of data beams. 0 for dynamic", true,
     " * Bins: ");
+  getParam(
+    "lidar.stamp_latency_s", _stampLatency, _stampLatency,
+    "Serial + host read latency subtracted from the scan stamp", true,
+    " * Stamp latency [s]: ");
+  _diagUpdater.setHardwareID(lowercase(_lidarModel));
   getParam(
     "lidar.range_min", _rangeMin, _rangeMin, "Minimum distance in units", false,
     " * Min. distance: ");
@@ -244,6 +260,7 @@ nav2_util::CallbackReturn LdLidarComponent::on_activate(const lc::State & prev_s
   // Reset per-activation scan state
   _firstScan = true;
   _pubFreq = 0.0;
+  _pubStamp = rclcpp::Time(0, 0, RCL_ROS_TIME);
 
   // Start lidar thread
   startLidarThread();
@@ -320,125 +337,65 @@ nav2_util::CallbackReturn LdLidarComponent::on_error(const lc::State & prev_stat
 
 void LdLidarComponent::publishLaserScan(ldlidar::Points2D & src, double lidar_spin_freq)
 {
-  float angle_min, angle_max, angle_increment;
-  double scan_time;
-  rclcpp::Time start_scan_time;
-
-  int beam_size = 0;
-
-  // With a fixed number of bins the compatibility with SlamToolbox is guaranteed
-  if (_bins > 0) {
-    beam_size = _bins;
-  } else {
-    beam_size = static_cast<int>(src.size());
-  }
-
-  // Need at least 2 beams to form a valid scan
-  if (beam_size < 2) {
-    return;
-  }
-
-  start_scan_time = this->now();
-  scan_time = (start_scan_time.seconds() - _endScanTime.seconds());
-
+  // The SDK drops the first revolution after a (re)start; so do we, to be safe.
   if (_firstScan) {
     _firstScan = false;
-    _endScanTime = start_scan_time;
     return;
   }
 
-  if (scan_time > 0.0) {
-    _pubFreq = 1.0 / scan_time;
+  std::vector<RawPoint> raw;
+  raw.reserve(src.size());
+  for (const auto & p : src) {
+    raw.push_back({p.angle, p.distance, p.intensity, p.stamp});
   }
 
-  // Adjust the parameters according to the demand
-  angle_min = 0;
-  angle_max = (2 * M_PI);
-  angle_increment = (angle_max - angle_min) / (float)(beam_size - 1);
-  // Calculate the number of scanning points
-  if (lidar_spin_freq > 0) {
-    std::unique_ptr<sensor_msgs::msg::LaserScan> msg =
-      std::make_unique<sensor_msgs::msg::LaserScan>();
-    msg->header.stamp = start_scan_time;
-    msg->header.frame_id = _frameId;
-    msg->angle_min = angle_min;
-    msg->angle_max = angle_max;
-    msg->range_min = _rangeMin;
-    msg->range_max = _rangeMax;
-    msg->angle_increment = angle_increment;
-    if (beam_size <= 1) {
-      msg->time_increment = 0;
-    } else {
-      msg->time_increment = static_cast<float>(scan_time / (double)(beam_size - 1));
-    }
-    msg->scan_time = scan_time;
-    // First fill all the data with Nan
-    msg->ranges.assign(beam_size, std::numeric_limits<float>::quiet_NaN());
-    msg->intensities.assign(beam_size, std::numeric_limits<float>::quiet_NaN());
-    for (auto point : src) {
-      float range = point.distance * _distScale;  // distance unit transform to meters
-      float intensity = point.intensity;      // laser receive intensity
-      float dir_angle = point.angle;
+  BinningParams prm;
+  prm.bins = _bins;
+  prm.counterclockwise = _counterclockwise;
+  prm.dist_scale = _distScale;
+  prm.range_min = _rangeMin;
+  prm.range_max = _rangeMax;
+  prm.crop = _enableAngleCrop;
+  prm.crop_min_deg = _angleCropMin;
+  prm.crop_max_deg = _angleCropMax;
+  prm.stamp_latency_s = _stampLatency;
 
-      if ((point.distance == 0) && (point.intensity == 0)) { // filter is handled to  0, Nan will be assigned variable.
-        range = std::numeric_limits<float>::quiet_NaN();
-        intensity = std::numeric_limits<float>::quiet_NaN();
-      }
-
-      if (_enableAngleCrop) { // Angle crop setting, Mask data within the set angle range
-        if ((dir_angle >= _angleCropMin) && (dir_angle <= _angleCropMax)) {
-          range = std::numeric_limits<float>::quiet_NaN();
-          intensity = std::numeric_limits<float>::quiet_NaN();
-        }
-      }
-
-      float angle = ANGLE_TO_RADIAN(dir_angle); // Lidar angle unit form degree transform to radian
-      int index = static_cast<int>(ceil((angle - angle_min) / angle_increment));
-      if (index < beam_size) {
-        if (index < 0) {
-          RCLCPP_ERROR(
-            get_logger(),
-            "error index: %d, beam_size: %d, angle: %f, msg->angle_min: %f, msg->angle_increment: %f",
-            index, beam_size, angle, angle_min, angle_increment);
-          continue;
-        }
-
-        if (_counterclockwise) {
-          int index_anticlockwise = beam_size - index - 1;
-          // If the current content is Nan, it is assigned directly
-          if (std::isnan(msg->ranges[index_anticlockwise])) {
-            msg->ranges[index_anticlockwise] = range;
-          } else { // Otherwise, only when the distance is less than the current
-                   //   value, it can be re assigned
-            if (range < msg->ranges[index_anticlockwise]) {
-              msg->ranges[index_anticlockwise] = range;
-            }
-          }
-          msg->intensities[index_anticlockwise] = intensity;
-        } else {
-          // If the current content is Nan, it is assigned directly
-          if (std::isnan(msg->ranges[index])) {
-            msg->ranges[index] = range;
-          } else { // Otherwise, only when the distance is less than the current
-                   //   value, it can be re assigned
-            if (range < msg->ranges[index]) {
-              msg->ranges[index] = range;
-            }
-          }
-          msg->intensities[index] = intensity;
-        }
-      }
-    }
-    _scanPub->publish(std::move(msg));
-    _endScanTime = start_scan_time;
+  BinnedScan binned;
+  if (!bin_scan(raw, lidar_spin_freq, prm, binned)) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 5000, "Scan dropped: no spin rate or no usable point stamps");
+    return;
   }
+
+  const rclcpp::Time stamp(static_cast<int64_t>(binned.stamp_s * 1e9), get_clock()->get_clock_type());
+  if (_pubStamp.nanoseconds() != 0 && stamp > _pubStamp) {
+    _pubFreq = 1.0 / (stamp - _pubStamp).seconds();
+  }
+  _pubStamp = stamp;
+  _lastPoints = static_cast<int>(src.size());
+
+  auto msg = std::make_unique<sensor_msgs::msg::LaserScan>();
+  msg->header.stamp = stamp;
+  msg->header.frame_id = _frameId;
+  msg->angle_min = binned.angle_min;
+  msg->angle_increment = binned.angle_increment;
+  msg->angle_max = binned.angle_min + binned.angle_increment * (binned.ranges.size() - 1);
+  msg->time_increment = binned.time_increment;
+  msg->scan_time = binned.scan_time;
+  msg->range_min = _rangeMin;
+  msg->range_max = _rangeMax;
+  msg->ranges = std::move(binned.ranges);
+  msg->intensities = std::move(binned.intensities);
+  _scanPub->publish(std::move(msg));
 }
 
 bool LdLidarComponent::initLidar()
 {
   _lidar = std::make_unique<ldlidar::LDLidarDriver>();
 
-  _lidar->RegisterGetTimestampFunctional(std::bind(&tools::GetSystemTimeStamp));
+  // Stamp packets on the node's clock so they follow use_sim_time.
+  _lidar->RegisterGetTimestampFunctional(
+    [this]() {return static_cast<uint64_t>(this->now().nanoseconds());});
   _lidar->EnableFilterAlgorithnmProcess(true);
 
   if (!initLidarComm()) {
@@ -555,6 +512,7 @@ void LdLidarComponent::callback_updateDiagnostic(diagnostic_updater::DiagnosticS
     double spin_hz;
     _lidar->GetLidarScanFreq(spin_hz);
     stat.addf("Single measure", "%.3f Hz", spin_hz);
+    stat.addf("Points per scan", "%d", _lastPoints.load());
 
     if (_publishing) {
       stat.addf("Publishing", "%.3f Hz", _pubFreq);

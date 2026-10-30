@@ -34,6 +34,7 @@
 #include "visibility_control.hpp"
 #include "defines.hpp"
 #include "ldlidar_driver.h"
+#include "scan_binning.hpp"
 
 namespace lc = rclcpp_lifecycle;
 
@@ -204,6 +205,7 @@ private:
   double _rangeMax = 15.0; ///< Maximum range.
   std::string _frameId = "ldlidar_link"; ///< Frame ID.
   float _distScale = 0.001; ///< Scale factor for distance.
+  double _stampLatency = 0.0; ///< Serial + host read latency subtracted from the scan stamp [s].
   // <---- Parameters
 
   // ----> Publishers
@@ -231,7 +233,8 @@ private:
 
   // ----> Scan state
   bool _firstScan = true; ///< First scan flag, reset on each activation.
-  rclcpp::Time _endScanTime; ///< Timestamp of the previous scan, used for scan_time computation.
+  rclcpp::Time _pubStamp{0, 0, RCL_ROS_TIME}; ///< Stamp of the previous scan, for the publish rate.
+  std::atomic<int> _lastPoints{0}; ///< Points in the last revolution.
   // <---- Scan state
 
   // ----> Diagnostic
