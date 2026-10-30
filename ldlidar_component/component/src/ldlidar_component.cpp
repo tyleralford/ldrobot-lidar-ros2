@@ -467,13 +467,16 @@ void LdLidarComponent::lidarThreadFunc()
     }
     // <---- Interruption check
 
-    int nSub = count_subscribers(_scanTopic);
+    // The publisher's own count: count_subscribers(name) expands the name but not a remap.
+    int nSub = _scanPub->get_subscription_count();
+    bool published = false;
     if (nSub > 0) {
       _publishing = true;
       switch (_lidar->GetLaserScanData(laser_scan_points, _readTimeOut_msec)) {
         case ldlidar::LidarStatus::NORMAL:
           _lidar->GetLidarScanFreq(lidar_scan_freq);
           publishLaserScan(laser_scan_points, lidar_scan_freq);
+          published = true;
           break;
         case ldlidar::LidarStatus::DATA_TIME_OUT:
           RCLCPP_ERROR(
@@ -488,12 +491,17 @@ void LdLidarComponent::lidarThreadFunc()
       _publishing = false;
     }
 
-    // Sleep until the next scan is ready
+    // A scan is ready once a turn, and the SDK's read does not wait for it. After publishing one,
+    // wait most of a turn; then poll, so the next goes out within milliseconds of being complete
+    // (sleeping a whole turn every pass published it up to a turn late).
+    using std::chrono::milliseconds;
     using std::chrono::nanoseconds;
-    if (_lidar->GetLidarScanFreq(lidar_scan_freq) && lidar_scan_freq != 0.0) {
-      rclcpp::sleep_for(nanoseconds(int64_t(1e9 / lidar_scan_freq)));
+    if (published && _lidar->GetLidarScanFreq(lidar_scan_freq) && lidar_scan_freq != 0.0) {
+      rclcpp::sleep_for(nanoseconds(int64_t(0.8e9 / lidar_scan_freq)));
+    } else if (nSub > 0) {
+      rclcpp::sleep_for(milliseconds(2));
     } else {
-      rclcpp::sleep_for(nanoseconds(int64_t(1e9 / 10)));
+      rclcpp::sleep_for(milliseconds(100));
     }
   }
 

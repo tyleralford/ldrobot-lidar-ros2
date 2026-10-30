@@ -131,7 +131,7 @@ protected:
     std::string description = std::string(),
     bool dynamic = false,
     std::string log_info = std::string(),
-    T min = std::numeric_limits<T>::min(), T max = std::numeric_limits<T>::max());
+    T min = std::numeric_limits<T>::lowest(), T max = std::numeric_limits<T>::max());
 
   /**
    * @brief Get all parameters for the node.
