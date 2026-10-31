@@ -206,6 +206,7 @@ private:
   std::string _frameId = "ldlidar_link"; ///< Frame ID.
   float _distScale = 0.001; ///< Scale factor for distance.
   double _stampLatency = 0.0; ///< Serial + host read latency subtracted from the scan stamp [s].
+  double _exitOnTimeout = 0.0; ///< Give up (exit, for a supervisor to restart) after this long without data [s]; 0: never.
   // <---- Parameters
 
   // ----> Publishers
@@ -240,7 +241,14 @@ private:
   // ----> Diagnostic
   double _pubFreq = 0.0; ///< Publishing frequency (Hz).
   std::atomic<bool> _publishing{false}; ///< Publishing flag.
+  std::atomic<bool> _dataMissing{false}; ///< The SDK reports no data: diagnostics say ERROR.
+  std::atomic<bool> _failed{false}; ///< The data has been missing for `_exitOnTimeout`.
   // <---- Diagnostic
+
+public:
+  /// The lidar thread gave up (no data for `lidar.exit_on_timeout_s`): the process should exit
+  /// with an error so that its supervisor starts it again, which reopens the serial port.
+  bool failed() const {return _failed;}
 };
 
 // ----> Template Function definitions

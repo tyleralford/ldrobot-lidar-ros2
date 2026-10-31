@@ -15,8 +15,10 @@
 
 #include "ldlidar_component.hpp"
 #include "ldlidar_tools.hpp"
+#include "data_watchdog.hpp"
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include "rcl_interfaces/msg/parameter_descriptor.hpp"
 #include "diagnostic_msgs/msg/diagnostic_status.hpp"
 #include "rmw/types.h"
@@ -181,6 +183,10 @@ bool LdLidarComponent::getLidarParams()
     "lidar.stamp_latency_s", _stampLatency, _stampLatency,
     "Serial + host read latency subtracted from the scan stamp", true,
     " * Stamp latency [s]: ");
+  getParam(
+    "lidar.exit_on_timeout_s", _exitOnTimeout, _exitOnTimeout,
+    "Exit after this long without data, for a supervisor to restart the driver (0: never)", true,
+    " * Exit on timeout [s]: ");
   _diagUpdater.setHardwareID(lowercase(_lidarModel));
   getParam(
     "lidar.range_min", _rangeMin, _rangeMin, "Minimum distance in units", false,
@@ -453,6 +459,8 @@ void LdLidarComponent::lidarThreadFunc()
 
   ldlidar::Points2D laser_scan_points;
   double lidar_scan_freq = 0.0;
+  DataWatchdog watchdog(_exitOnTimeout);
+  _dataMissing = false;
 
   while (1) {
     // ----> Interruption check
@@ -472,6 +480,7 @@ void LdLidarComponent::lidarThreadFunc()
     bool published = false;
     if (nSub > 0) {
       _publishing = true;
+      bool timed_out = false;
       switch (_lidar->GetLaserScanData(laser_scan_points, _readTimeOut_msec)) {
         case ldlidar::LidarStatus::NORMAL:
           _lidar->GetLidarScanFreq(lidar_scan_freq);
@@ -479,13 +488,29 @@ void LdLidarComponent::lidarThreadFunc()
           published = true;
           break;
         case ldlidar::LidarStatus::DATA_TIME_OUT:
-          RCLCPP_ERROR(
-            get_logger(), "get ldlidar data is time out, please check your lidar device.");
+          timed_out = true;
+          RCLCPP_ERROR_THROTTLE(
+            get_logger(), *get_clock(), 5000,
+            "get ldlidar data is time out, please check your lidar device.");
           break;
         case ldlidar::LidarStatus::DATA_WAIT:
           break;
         default:
           break;
+      }
+      const double now_s = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+      const auto verdict = watchdog.update(timed_out, published, now_s);
+      _dataMissing = verdict != DataWatchdog::State::kOk;
+      if (verdict == DataWatchdog::State::kFailed) {
+        // A stalled link does not come back by itself: the port has to be reopened, which a
+        // restart does. Exit with an error for the supervisor (launch's respawn).
+        RCLCPP_FATAL(
+          get_logger(), "No data from the lidar for %.0f s: exiting so that it is restarted.",
+          _exitOnTimeout);
+        _failed = true;
+        rclcpp::shutdown();
+        break;
       }
     } else {
       _publishing = false;
@@ -512,7 +537,10 @@ void LdLidarComponent::callback_updateDiagnostic(diagnostic_updater::DiagnosticS
 {
   rclcpp_lifecycle::State state = get_current_state();
 
-  if (state.id() == 3) {  // ACTIVE
+  if (state.id() == 3 && _dataMissing) {  // ACTIVE, but the sensor has gone quiet
+    stat.summary(
+      diagnostic_msgs::msg::DiagnosticStatus::ERROR, "No data from the sensor");
+  } else if (state.id() == 3) {  // ACTIVE
     stat.summary(
       diagnostic_msgs::msg::DiagnosticStatus::OK, std::string(
         "Node state: ") + state.label());

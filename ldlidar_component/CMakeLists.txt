@@ -231,6 +231,8 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_scan_binning test/test_scan_binning.cpp)
   target_include_directories(test_scan_binning PRIVATE component/include)
+  ament_add_gtest(test_data_watchdog test/test_data_watchdog.cpp)
+  target_include_directories(test_data_watchdog PRIVATE component/include)
 
   find_package(ament_lint_auto REQUIRED)
   # These four scan the vendored LDROBOT SDK and the upstream component, neither of which has
