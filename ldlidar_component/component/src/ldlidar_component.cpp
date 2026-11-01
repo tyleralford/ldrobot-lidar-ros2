@@ -237,6 +237,7 @@ nav2_util::CallbackReturn LdLidarComponent::on_configure(const lc::State & prev_
 
   // ----> Connect to Lidar
   if (!initLidar()) {
+    exitForRestart();
     return nav2_util::CallbackReturn::ERROR;  // Transition to Finalized state
     // Note: we could use FAILURE instead of ERROR to remain in unconfigured
     // state and try again to connect
@@ -393,6 +394,25 @@ void LdLidarComponent::publishLaserScan(ldlidar::Points2D & src, double lidar_sp
   msg->ranges = std::move(binned.ranges);
   msg->intensities = std::move(binned.intensities);
   _scanPub->publish(std::move(msg));
+}
+
+void LdLidarComponent::exitForRestart()
+{
+  if (_exitOnTimeout <= 0.0 || _exitTimer) {
+    return;
+  }
+  // Not at once: with the sensor unplugged every restart would fail again within a second and
+  // the supervisor would restart it every 2 s for as long as it stays out. A few seconds keeps
+  // that to a line in the log every five or so, and a replug is noticed within them.
+  constexpr std::chrono::seconds kRetryDelay{3};
+  RCLCPP_ERROR(
+    get_logger(), "The lidar could not be brought up: exiting in %ld s so that it is restarted.",
+    static_cast<long>(kRetryDelay.count()));
+  _failed = true;
+  _exitTimer = create_wall_timer(
+    kRetryDelay, []() {
+      rclcpp::shutdown();
+    });
 }
 
 bool LdLidarComponent::initLidar()

@@ -161,6 +161,13 @@ protected:
    */
   bool initLidar();
 
+  /// The port could not be opened, or the sensor did not answer: end the process, with an error,
+  /// a few seconds from now, for its supervisor to start it again (a respawn reopens the port).
+  /// Without this the lifecycle's ERROR leaves a Finalized node that spins for ever, and a
+  /// sensor unplugged for a moment is never looked for again. A no-op when `lidar.exit_on_timeout_s`
+  /// is 0, the setting for a run with no supervisor, where it would only leave the driver gone.
+  void exitForRestart();
+
   /**
    * @brief Initialize the lidar communication.
    * @return True if successful, false otherwise.
@@ -242,7 +249,8 @@ private:
   double _pubFreq = 0.0; ///< Publishing frequency (Hz).
   std::atomic<bool> _publishing{false}; ///< Publishing flag.
   std::atomic<bool> _dataMissing{false}; ///< The SDK reports no data: diagnostics say ERROR.
-  std::atomic<bool> _failed{false}; ///< The data has been missing for `_exitOnTimeout`.
+  std::atomic<bool> _failed{false}; ///< The driver gave up: no data for `_exitOnTimeout`, or it could not be brought up.
+  rclcpp::TimerBase::SharedPtr _exitTimer; ///< Ends the process a few seconds after a failed configure.
   // <---- Diagnostic
 
 public:
