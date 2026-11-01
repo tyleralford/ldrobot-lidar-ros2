@@ -187,6 +187,10 @@ bool LdLidarComponent::getLidarParams()
     "lidar.exit_on_timeout_s", _exitOnTimeout, _exitOnTimeout,
     "Exit after this long without data, for a supervisor to restart the driver (0: never)", true,
     " * Exit on timeout [s]: ");
+  getParam(
+    "lidar.publish_intensities", _publishIntensities, _publishIntensities,
+    "Fill LaserScan.intensities (as many floats as ranges); false halves the size of /scan",
+    false, " * Publish intensities: ");
   _diagUpdater.setHardwareID(lowercase(_lidarModel));
   getParam(
     "lidar.range_min", _rangeMin, _rangeMin, "Minimum distance in units", false,
@@ -392,7 +396,9 @@ void LdLidarComponent::publishLaserScan(ldlidar::Points2D & src, double lidar_sp
   msg->range_min = _rangeMin;
   msg->range_max = _rangeMax;
   msg->ranges = std::move(binned.ranges);
-  msg->intensities = std::move(binned.intensities);
+  if (_publishIntensities) {
+    msg->intensities = std::move(binned.intensities);
+  }
   _scanPub->publish(std::move(msg));
 }
 

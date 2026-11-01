@@ -213,6 +213,7 @@ private:
   std::string _frameId = "ldlidar_link"; ///< Frame ID.
   float _distScale = 0.001; ///< Scale factor for distance.
   double _stampLatency = 0.0; ///< Serial + host read latency subtracted from the scan stamp [s].
+  bool _publishIntensities = true; ///< Fill LaserScan.intensities (half of a scan's bytes; few consumers read them).
   double _exitOnTimeout = 0.0; ///< Give up (exit, for a supervisor to restart) after this long without data [s]; 0: never.
   // <---- Parameters
 
